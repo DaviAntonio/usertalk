@@ -1,3 +1,7 @@
+# binaries
 *.o
 server
 client
+
+# vim swap
+*.swp
