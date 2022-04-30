@@ -21,6 +21,7 @@ enum client_status {
 
 struct client {
 	int fd;
+	int id;
 	struct sockaddr_in addr;
 	char msg[MSG_LEN];
 	enum client_status status;
@@ -30,7 +31,7 @@ int epoll_fd;
 struct epoll_event events[MAX_EVENTS];
 
 void server_loop(int server_sock);
-void serve_client(int client_sock, struct sockaddr_in client_addr);
+void serve_client(struct client *cl);
 
 void server_loop(int server_sock)
 {
@@ -53,6 +54,7 @@ void server_loop(int server_sock)
 		for (int i = 0; i < ready_fds; i++) {
 			// the server socket woke up, so a client is ready
 			if (events[i].data.fd == server_sock) {
+				char addr[INET_ADDRSTRLEN];
 				client_sock = accept(server_sock,
 					(struct sockaddr *) &client_addr,
 					&client_addr_len);
@@ -60,6 +62,16 @@ void server_loop(int server_sock)
 					error_at_line(0, errno, __FILE__,
 							__LINE__, "accept()");
 				}
+				if (inet_ntop(AF_INET, &(client_addr.sin_addr),
+							addr,
+							INET_ADDRSTRLEN) == NULL) {
+					error_at_line(0, errno, __FILE__,
+							__LINE__,
+							"inet_ntop()");
+				}
+				printf("\nClient %s:%u connected\n", addr,
+						ntohs(client_addr.sin_port));
+
 				// add client to list
 				// watch when it is ready to be read
 				// watch for abnormalities
@@ -75,6 +87,7 @@ void server_loop(int server_sock)
 				}
 				struct epoll_event event;
 				cl->fd = client_sock;
+				cl->id = random();
 				cl->addr = client_addr;
 				cl->status = TO_READ;
 				event.data.ptr = cl;
@@ -86,20 +99,22 @@ void server_loop(int server_sock)
 							__LINE__,
 							"epoll_ctl()");
 				}
-				printf("Adding client %d\n", cl->fd);
+				printf("Adding client %d @ %s:%u\n", cl->id,
+						addr,
+						ntohs(cl->addr.sin_port));
 			} else {
 				struct client *cl = events[i].data.ptr;
 
 				// something that is not the server socket
 				// able to read
 				if (events[i].events & EPOLLIN) {
-					printf("Serving client %d\n", cl->fd);
-					serve_client(cl->fd, cl->addr);
+					printf("\nServing client %d\n", cl->id);
+					serve_client(cl);
 				} else if ((events[i].events & EPOLLRDHUP) ||
 						(events[i].events & EPOLLHUP)) {
 					// remove from list
-					printf("Removing client %d\n",
-							cl->fd);
+					printf("\nRemoving client %d\n",
+							cl->id);
 					result = epoll_ctl(epoll_fd,
 							EPOLL_CTL_DEL,
 							cl->fd,
@@ -111,7 +126,7 @@ void server_loop(int server_sock)
 								"epoll_ctl()");
 					}
 					printf("Closing client %d\n",
-							cl->fd);
+							cl->id);
 					close(cl->fd);
 					free(cl);
 				}
@@ -123,17 +138,11 @@ void server_loop(int server_sock)
 
 }
 
-void serve_client(int client_sock, struct sockaddr_in client_addr) {
-	char addr[INET_ADDRSTRLEN];
+void serve_client(struct client *cl) {
 	char msg[MSG_LEN];
 	char new_msg[MSG_LEN];
 	int result;
-
-	if (inet_ntop(AF_INET, &(client_addr.sin_addr), addr,
-				INET_ADDRSTRLEN) == NULL) {
-		error_at_line(0, errno, __FILE__, __LINE__, "inet_ntop()");
-	}
-	printf("\nClient %s:%u connected\n", addr, ntohs(client_addr.sin_port));
+	int client_sock = cl->fd;
 
 	// get the sent message
 	memset(msg, 0, MSG_LEN);
@@ -176,6 +185,9 @@ int main(int argc, char **argv)
 	}
 
 	printf("Server started!\n");
+
+	// initialise random
+	srandom(getpid());
 
 	// server's address
 	memset(&srv_addr, 0, sizeof(srv_addr));
