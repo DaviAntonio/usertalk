@@ -100,7 +100,7 @@ int main(int argc, char **argv)
 						"recv()");
 			}
 		} else {
-			printf("Got from server '%.*s\n", MSG_LEN, msg);
+			printf("Got from server: %.*s\n", MSG_LEN, msg);
 		}
 	}
 
