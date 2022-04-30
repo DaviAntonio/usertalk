@@ -45,31 +45,31 @@ int main(int argc, char **argv)
 
 	// app loop
 	char msg[MSG_LEN];
+	// TCP socket
+	srv_sock = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (srv_sock == -1) {
+		error_at_line(-1, errno, __FILE__, __LINE__, "socket()");
+	}
+
+	// Watch if the other end remains connected
+	opt = 1;
+	if (setsockopt(srv_sock, SOL_SOCKET, SO_KEEPALIVE, &opt,
+				sizeof(opt)) == -1) {
+		error_at_line(-2, errno, __FILE__, __LINE__,
+				"setsockopt(SO_KEEPALIVE)");
+	}
+	// try to connect to server
+	if (connect(srv_sock, (const struct sockaddr*) &srv_addr,
+				sizeof(srv_addr)) == -1) {
+		error_at_line(-2, errno, __FILE__, __LINE__, "connect()");
+	}
+
+	memset(msg, 0, MSG_LEN);
+
+	printf("Connected!\n");
 
 	while (!stop) {
-		// TCP socket
-		srv_sock = socket(AF_INET, SOCK_STREAM, 0);
-
-		if (srv_sock == -1) {
-			error_at_line(-1, errno, __FILE__, __LINE__, "socket()");
-		}
-
-		// Watch if the other end remains connected
-		opt = 1;
-		if (setsockopt(srv_sock, SOL_SOCKET, SO_KEEPALIVE, &opt,
-					sizeof(opt)) == -1) {
-			error_at_line(-2, errno, __FILE__, __LINE__,
-					"setsockopt(SO_KEEPALIVE)");
-		}
-		// try to connect to server
-		if (connect(srv_sock, (const struct sockaddr*) &srv_addr,
-					sizeof(srv_addr)) == -1) {
-			error_at_line(-2, errno, __FILE__, __LINE__, "connect()");
-		}
-
-		memset(msg, 0, MSG_LEN);
-
-		printf("Connected!\n");
 		printf("> ");
 		if (scanf(" %" MAX_MSG_LEN_STR "[^\n]", msg) != 1) {
 			printf("Stopping...\n");
@@ -80,7 +80,7 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		// send message from server
+		// send message to server
 		if (send(srv_sock, msg, strlen(msg), 0) == -1) {
 			error_at_line(0, errno, __FILE__, __LINE__, "send()");
 		}
@@ -92,6 +92,9 @@ int main(int argc, char **argv)
 		if (result <= 0) {
 			if (!result) {
 				printf("Empty message\n");
+				printf("Closing...\n");
+				close(srv_sock);
+				stop = true;
 			} else {
 				error_at_line(0, errno, __FILE__, __LINE__,
 						"recv()");
@@ -99,8 +102,6 @@ int main(int argc, char **argv)
 		} else {
 			printf("Got from server '%.*s\n", MSG_LEN, msg);
 		}
-		printf("Closing...\n");
-		close(srv_sock);
 	}
 
 	return 0;

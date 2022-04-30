@@ -7,8 +7,27 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/epoll.h>
 
 #include "settings.h"
+
+#define MAX_EVENTS (100)
+
+enum client_status {
+	TO_READ,
+	TO_WRITE,
+	TO_CLOSE
+};
+
+struct client {
+	int fd;
+	struct sockaddr_in addr;
+	char msg[MSG_LEN];
+	enum client_status status;
+};
+
+int epoll_fd;
+struct epoll_event events[MAX_EVENTS];
 
 void server_loop(int server_sock);
 void serve_client(int client_sock, struct sockaddr_in client_addr);
@@ -17,19 +36,89 @@ void server_loop(int server_sock)
 {
 	struct sockaddr_in client_addr;
 	socklen_t client_addr_len = sizeof(client_addr);
+	int ready_fds;
+	int client_sock;
+	int result;
 
 	while (1) {
-		int client_sock = accept(server_sock,
-				(struct sockaddr *) &client_addr,
-				&client_addr_len);
-		if (client_sock == -1) {
-			error_at_line(0, errno, __FILE__, __LINE__,
-					"accept()");
+		// block forever until event or signal
+		ready_fds = epoll_wait(epoll_fd, events, MAX_EVENTS - 1, -1);
+
+		if (ready_fds == -1) {
+			error_at_line(-1, errno, __FILE__, __LINE__,
+					"epoll_wait()");
 		}
 
-		serve_client(client_sock, client_addr);
+		// which event is ready?
+		for (int i = 0; i < ready_fds; i++) {
+			// the server socket woke up, so a client is ready
+			if (events[i].data.fd == server_sock) {
+				client_sock = accept(server_sock,
+					(struct sockaddr *) &client_addr,
+					&client_addr_len);
+				if (client_sock == -1) {
+					error_at_line(0, errno, __FILE__,
+							__LINE__, "accept()");
+				}
+				// add client to list
+				// watch when it is ready to be read
+				// watch for abnormalities
+				// watch for closed on client
+				struct client *cl = malloc(sizeof(*cl));
+				if (cl == NULL) {
+					fprintf(stderr,
+							__FILE__ \
+							" " \
+							XSTR(__LINE__) \
+							" malloc()\n");
+					exit(EXIT_FAILURE);
+				}
+				struct epoll_event event;
+				cl->fd = client_sock;
+				cl->addr = client_addr;
+				cl->status = TO_READ;
+				event.data.ptr = cl;
+				event.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
+				result = epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
+						cl->fd, &event);
+				if (result == -1) {
+					error_at_line(-1, errno, __FILE__,
+							__LINE__,
+							"epoll_ctl()");
+				}
+				printf("Adding client %d\n", cl->fd);
+			} else {
+				struct client *cl = events[i].data.ptr;
 
-		close(client_sock);
+				// something that is not the server socket
+				// able to read
+				if (events[i].events & EPOLLIN) {
+					printf("Serving client %d\n", cl->fd);
+					serve_client(cl->fd, cl->addr);
+				} else if ((events[i].events & EPOLLRDHUP) ||
+						(events[i].events & EPOLLHUP)) {
+					// remove from list
+					printf("Removing client %d\n",
+							cl->fd);
+					result = epoll_ctl(epoll_fd,
+							EPOLL_CTL_DEL,
+							cl->fd,
+							NULL);
+					if (result == -1) {
+						error_at_line(-1, errno,
+								__FILE__,
+								__LINE__,
+								"epoll_ctl()");
+					}
+					printf("Closing client %d\n",
+							cl->fd);
+					close(cl->fd);
+					free(cl);
+				}
+			}
+
+		}
+
 	}
 
 }
@@ -53,6 +142,11 @@ void serve_client(int client_sock, struct sockaddr_in client_addr) {
 	if (result <= 0) {
 		if (result == 0) {
 			printf("Empty message\n");
+			printf("Closing...\n");
+			close(client_sock);
+			printf("Removing...\n");
+			epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_sock, NULL);
+			return;
 		} else {
 			error_at_line(0, errno, __FILE__, __LINE__, "recv()");
 		}
@@ -147,6 +241,21 @@ int main(int argc, char **argv)
 	}
 
 	printf("Listening on %s:%s\n", argv[1], argv[2]);
+
+	// Initialise epoll
+	epoll_fd = epoll_create1(0);
+	if (epoll_fd == -1) {
+		error_at_line(-1, errno, __FILE__, __LINE__,
+				"epoll_create1()");
+	}
+	// watch this socket for clients (socket available for read)
+	struct epoll_event event;
+	event.data.fd = sock;
+	event.events = EPOLLIN;
+	result = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &event);
+	if (result == -1) {
+		error_at_line(-1, errno, __FILE__, __LINE__, "epoll_ctl()");
+	}
 
 	// begin server loop
 	server_loop(sock);
