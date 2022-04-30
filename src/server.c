@@ -21,7 +21,7 @@ enum client_status {
 
 struct client {
 	int fd;
-	int id;
+	unsigned int id;
 	struct sockaddr_in addr;
 	char msg[MSG_LEN];
 	enum client_status status;
@@ -99,21 +99,18 @@ void server_loop(int server_sock)
 							__LINE__,
 							"epoll_ctl()");
 				}
-				printf("Adding client %d @ %s:%u\n", cl->id,
+				printf("Adding client %u @ %s:%u\n", cl->id,
 						addr,
 						ntohs(cl->addr.sin_port));
 			} else {
 				struct client *cl = events[i].data.ptr;
 
 				// something that is not the server socket
-				// able to read
-				if (events[i].events & EPOLLIN) {
-					printf("\nServing client %d\n", cl->id);
-					serve_client(cl);
-				} else if ((events[i].events & EPOLLRDHUP) ||
+				if ((events[i].events & EPOLLRDHUP) ||
 						(events[i].events & EPOLLHUP)) {
 					// remove from list
-					printf("\nRemoving client %d\n",
+					printf("\nA client has left\n");
+					printf("Removing client %u\n",
 							cl->id);
 					result = epoll_ctl(epoll_fd,
 							EPOLL_CTL_DEL,
@@ -125,11 +122,76 @@ void server_loop(int server_sock)
 								__LINE__,
 								"epoll_ctl()");
 					}
-					printf("Closing client %d\n",
+					printf("Closing client %u\n",
 							cl->id);
 					close(cl->fd);
 					free(cl);
+				} else {
+					// try to serve the client
+					printf("\nServing client %u\n", cl->id);
+					serve_client(cl);
+
+					// setting up the next events to watch
+					struct epoll_event ev;
+					ev.data.ptr = cl;
+					switch (cl->status) {
+					case TO_READ:
+						printf("Marking client %u for reading\n",
+								cl->id);
+						ev.events = EPOLLIN | EPOLLRDHUP
+							| EPOLLHUP;
+						result = epoll_ctl(epoll_fd,
+							EPOLL_CTL_MOD,
+							cl->fd,
+							&ev);
+						if (result == -1) {
+							error_at_line(-1, errno,
+								__FILE__,
+								__LINE__,
+								"epoll_ctl()");
+						}
+
+						break;
+					case TO_WRITE:
+						printf("Marking client %u for reading\n",
+								cl->id);
+						ev.events = EPOLLOUT | EPOLLRDHUP
+							| EPOLLHUP;
+						result = epoll_ctl(epoll_fd,
+							EPOLL_CTL_MOD,
+							cl->fd,
+							&ev);
+						if (result == -1) {
+							error_at_line(-1, errno,
+								__FILE__,
+								__LINE__,
+								"epoll_ctl()");
+						}
+
+						break;
+					case TO_CLOSE:
+						printf("Removing client %u\n",
+							cl->id);
+						result = epoll_ctl(epoll_fd,
+							EPOLL_CTL_DEL,
+							cl->fd,
+							NULL);
+						if (result == -1) {
+							error_at_line(-1, errno,
+								__FILE__,
+								__LINE__,
+								"epoll_ctl()");
+						}
+						printf("Closing client %u\n",
+							cl->id);
+						close(cl->fd);
+						free(cl);
+						break;
+					default:
+						printf("Unkown client status\n");
+					}
 				}
+
 			}
 
 		}
@@ -140,35 +202,50 @@ void server_loop(int server_sock)
 
 void serve_client(struct client *cl) {
 	char msg[MSG_LEN];
-	char new_msg[MSG_LEN];
 	int result;
 	int client_sock = cl->fd;
 
-	// get the sent message
-	memset(msg, 0, MSG_LEN);
-	result = recv(client_sock, msg, MSG_LEN, 0);
+	if (cl->status == TO_READ) {
+		// get the sent message
+		memset(msg, 0, MSG_LEN);
+		result = recv(client_sock, msg, MSG_LEN, 0);
 
-	if (result <= 0) {
-		if (result == 0) {
-			printf("Empty message\n");
-			printf("Closing...\n");
-			close(client_sock);
-			printf("Removing...\n");
-			epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_sock, NULL);
-			return;
+		if (result <= 0) {
+			if (result == 0) {
+				printf("Empty message from client %u\n",
+						cl->id);
+			} else {
+				error_at_line(0, errno, __FILE__, __LINE__,
+						"recv()");
+			}
+			printf("Will mark client %u for removal\n",
+					cl->id);
+			cl->status = TO_CLOSE;
 		} else {
-			error_at_line(0, errno, __FILE__, __LINE__, "recv()");
+			printf("Client %u said: %.*s\n", cl->id, MSG_LEN, msg);
+			// TODO: run stuff...
+			// prepare a message
+			memset(cl->msg, 0, MSG_LEN);
+			strncat(cl->msg, "You said: ", MSG_LEN - strlen(cl->msg) - 1);
+			strncat(cl->msg, msg, MSG_LEN - strlen(cl->msg) - 1);
+			// mark to expect a write event
+			printf("Will mark client %u for writing\n",
+					cl->id);
+			cl->status = TO_WRITE;
 		}
-	} else {
-		printf("Client said %.*s\n", MSG_LEN, msg);
-	}
 
-	// send a message
-	memset(new_msg, 0, MSG_LEN);
-	strncat(new_msg, "Client said: ", MSG_LEN - strlen(new_msg) - 1);
-	strncat(new_msg, msg, MSG_LEN - strlen(new_msg) - 1);
-	if (send(client_sock, new_msg, strlen(new_msg), 0) == -1) {
-		error_at_line(0, errno, __FILE__, __LINE__, "send()");
+	} else if (cl->status == TO_WRITE) {
+		// write the stored message
+		if (send(client_sock, cl->msg, strlen(cl->msg), 0) == -1) {
+			error_at_line(0, errno, __FILE__, __LINE__, "send()");
+			printf("Will mark client %u for removal\n",
+					cl->id);
+			cl->status = TO_CLOSE;
+		}
+		// mark to expect a read event
+		printf("Will mark client %u for reading\n",
+				cl->id);
+		cl->status = TO_READ;
 	}
 }
 
