@@ -22,6 +22,7 @@ enum client_status {
 struct client {
 	int fd;
 	unsigned int id;
+	char nick[NICK_LEN];
 	struct sockaddr_in addr;
 	char msg[MSG_LEN];
 	enum client_status status;
@@ -32,6 +33,7 @@ struct epoll_event events[MAX_EVENTS];
 
 void server_loop(int server_sock);
 void serve_client(struct client *cl);
+void process_client_cmd(struct client *cl);
 
 void server_loop(int server_sock)
 {
@@ -88,6 +90,7 @@ void server_loop(int server_sock)
 				struct epoll_event event;
 				cl->fd = client_sock;
 				cl->id = random();
+				snprintf(cl->nick, MAX_NICK_LEN, "%u", cl->id);
 				cl->addr = client_addr;
 				cl->status = TO_READ;
 				event.data.ptr = cl;
@@ -223,12 +226,12 @@ void serve_client(struct client *cl) {
 			cl->status = TO_CLOSE;
 		} else {
 			printf("Client %u said: %.*s\n", cl->id, MSG_LEN, msg);
+			strncpy(cl->msg, msg, MAX_MSG_LEN);
 			// TODO: run stuff...
-			// prepare a message
-			memset(cl->msg, 0, MSG_LEN);
-			strncat(cl->msg, "You said: ", MSG_LEN - strlen(cl->msg) - 1);
-			strncat(cl->msg, msg, MSG_LEN - strlen(cl->msg) - 1);
+			// response will be placed on cl->msg
+			process_client_cmd(cl);
 			// mark to expect a write event
+			printf("Will send: %.*s\n", MSG_LEN, cl->msg);
 			printf("Will mark client %u for writing\n",
 					cl->id);
 			cl->status = TO_WRITE;
@@ -247,6 +250,56 @@ void serve_client(struct client *cl) {
 				cl->id);
 		cl->status = TO_READ;
 	}
+}
+
+void process_client_cmd(struct client *cl)
+{
+	unsigned int ui;
+	char cmd[MSG_LEN];
+	int n;
+
+	if (sscanf(cl->msg, "\\SETNAME %" MAX_NICK_LEN_STR "s%n", cmd, &n) == 1) {
+		// switch user nick
+		if (n > 0 && cl->msg[n] == '\0') {
+			strncpy(cl->nick, cmd, MAX_NICK_LEN);
+			printf("Change user nick to %.*s\n", NICK_LEN, cl->nick);
+			snprintf(cl->msg, MAX_MSG_LEN,
+					"\\SERVERMSG SERVER> Nick changed to: %.*s",
+					NICK_LEN, cl->nick);
+		} else {
+			snprintf(cl->msg, MAX_MSG_LEN,
+					"\\SERVERMSG SERVER> Invalid nick");
+		}
+	} else if (sscanf(cl->msg, "\\NEWROOM %u", &ui) == 1) {
+		// create room with limit
+		printf("Create room\n");
+	} else if (sscanf(cl->msg, "\\JOINROOM %u", &ui) == 1) {
+		// join room with id
+		printf("Join room\n");
+	} else if (sscanf(cl->msg, "\\%" MAX_MSG_LEN_STR "s%n", cmd, &n) == 1) {
+		// commands without arguments
+		if (n > 0 && cl->msg[n] == '\0') {
+			// process commands
+			if (strncmp("LEAVEROOM", cmd, MSG_LEN) == 0) {
+				// leave the current room
+				printf("Leave room\n");
+			} else {
+				printf("Invalid simple command\n");
+				snprintf(cl->msg, MAX_MSG_LEN,
+						"\\SERVERMSG SERVER> Invalid simple command");
+			}
+		} else {
+			// invalid command
+			printf("Invalid command\n");
+			snprintf(cl->msg, MAX_MSG_LEN,
+					"\\SERVERMSG SERVER> Invalid command");
+		}
+	} else {
+		printf("Invalid command format\n");
+		snprintf(cl->msg, MAX_MSG_LEN,
+				"\\SERVERMSG SERVER> Invalid command format");
+	}
+
 }
 
 int main(int argc, char **argv)

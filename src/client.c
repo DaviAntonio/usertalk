@@ -69,8 +69,14 @@ int main(int argc, char **argv)
 
 	printf("Connected!\n");
 
+	char *prompt;
+	char *std_prompt = "> ";
+	char custom_prompt[MSG_LEN];
+	prompt = std_prompt;
+
 	while (!stop) {
-		printf("> ");
+		prompt = std_prompt;
+		printf("%s", prompt);
 		if (scanf(" %" MAX_MSG_LEN_STR "[^\n]", msg) != 1) {
 			printf("Stopping...\n");
 			stop = true;
@@ -100,7 +106,25 @@ int main(int argc, char **argv)
 						"recv()");
 			}
 		} else {
-			printf("Got from server: %.*s\n", MSG_LEN, msg);
+			char display_msg[MSG_LEN];
+			int n;
+			if (sscanf(msg,
+				"\\SERVERMSG %" MAX_MSG_LEN_STR "s %" MAX_MSG_LEN_STR "[^\n]%n",
+				custom_prompt, display_msg, &n) == 2) {
+				if (n > 0 && msg[n] == '\0') {
+					prompt = custom_prompt;
+					printf("%.*s %.*s\n", MSG_LEN, prompt,
+							MSG_LEN, display_msg);
+				} else {
+					prompt = std_prompt;
+					printf("Got invalid command from server: %.*s\n",
+							MSG_LEN, msg);
+				}
+			} else {
+				prompt = std_prompt;
+				printf("Got invalid command format from server: %.*s\n",
+						MSG_LEN, msg);
+			}
 		}
 	}
 
