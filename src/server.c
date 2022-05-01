@@ -257,8 +257,20 @@ void process_client_cmd(struct client *cl)
 	unsigned int ui;
 	char cmd[MSG_LEN];
 	int n;
+	const char *help_msg =  "Available commands: " \
+				"(\\HELP" \
+				" Shows this text)," \
+				"(\\SETNICK new_nickname" \
+				" Sets user's nickname to new_nickname" \
+				" limited to " MAX_NICK_LEN_STR " characters)," \
+				"(\\NEWROOM id" \
+				" Creates a new room with id)," \
+				"(\\JOINROOM id" \
+				" Joins the room with id)," \
+				"(\\LEAVEROOM" \
+				" Leaves the current room)";
 
-	if (sscanf(cl->msg, "\\SETNAME %" MAX_NICK_LEN_STR "s%n", cmd, &n) == 1) {
+	if (sscanf(cl->msg, "\\SETNICK %" MAX_NICK_LEN_STR "s%n", cmd, &n) == 1) {
 		// switch user nick
 		if (n > 0 && cl->msg[n] == '\0') {
 			strncpy(cl->nick, cmd, MAX_NICK_LEN);
@@ -283,6 +295,12 @@ void process_client_cmd(struct client *cl)
 			if (strncmp("LEAVEROOM", cmd, MSG_LEN) == 0) {
 				// leave the current room
 				printf("Leave room\n");
+			} else if (strncmp("HELP", cmd, MSG_LEN) == 0) {
+				printf("Help requested\n");
+				snprintf(cl->msg, MAX_MSG_LEN,
+						"\\SERVERMSG SERVER> %.*s",
+						(int) strlen(help_msg),
+						help_msg);
 			} else {
 				printf("Invalid simple command\n");
 				snprintf(cl->msg, MAX_MSG_LEN,
