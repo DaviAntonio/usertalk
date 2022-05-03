@@ -286,7 +286,8 @@ void process_client_cmd(struct client *cl)
 				" Sets user's nickname to new_nickname" \
 				" limited to " MAX_NICK_LEN_STR " characters)," \
 				"(\\NEWROOM limit name" \
-				" Creates a room with limit and name)," \
+				" Creates a room with limit and name" \
+				" limited to " MAX_ROOM_NAME_LEN_STR " characters)," \
 				"(\\JOINROOM id" \
 				" Joins the room with id and leaves the current one)," \
 				"(\\INFO" \
