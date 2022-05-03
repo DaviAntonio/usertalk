@@ -12,7 +12,7 @@ CC = gcc
 CPPFLAGS = -Iinclude
 
 DEBUG := -g3
-OPTIMIZATION := -flto -O2
+OPTIMIZATION := -O2
 WARNINGS := -Wall -Wextra -pedantic -D_FORTIFY_SOURCE=1 -Wformat-overflow=2 \
 -Wformat-security -Wformat-truncation=2 -fanalyzer
 OTHER := $(OPTIMIZATION) $(WARNINGS)
@@ -21,9 +21,11 @@ CFLAGS := $(DEBUG) $(OTHER)
 LDFLAGS =
 LDLIBS =
 
+HEADERS = $(wildcard include/*.h)
+
 all : $(EXE)
 
-$(EXE) : $(filter-out $(OBJ_DIR)/$@.c, $(OBJ))
+$(EXE) : $(filter-out $(OBJ_DIR)/$@.c, $(OBJ)) $(HEADERS)
 	@echo "Building target: $@"
 	@echo "Invoking: GCC C Linker"
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ "$(SRC_DIR)/$@.c" $(FOBJ) $(LDLIBS)

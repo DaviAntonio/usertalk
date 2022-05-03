@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <unistd.h>
 #include <errno.h>
 #include <error.h>
@@ -10,30 +11,46 @@
 #include <sys/epoll.h>
 
 #include "settings.h"
+#include "room.h"
+#include "server_client.h"
 
 #define MAX_EVENTS (100)
 
-enum client_status {
-	TO_READ,
-	TO_WRITE,
-	TO_CLOSE
-};
-
-struct client {
-	int fd;
-	unsigned int id;
-	char nick[NICK_LEN];
-	struct sockaddr_in addr;
-	char msg[MSG_LEN];
-	enum client_status status;
-};
-
 int epoll_fd;
 struct epoll_event events[MAX_EVENTS];
+room_queue_t *rooms;
 
+void remove_server_client(struct client *cl);
 void server_loop(int server_sock);
 void serve_client(struct client *cl);
 void process_client_cmd(struct client *cl);
+int broadcast_message(struct client *cl, struct room *room);
+
+void remove_server_client(struct client *cl)
+{
+	int result;
+
+	printf("Removing client %u\n", cl->id);
+	result = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, cl->fd, NULL);
+	if (result == -1) {
+		error_at_line(-1, errno, __FILE__, __LINE__, "epoll_ctl()");
+	}
+	printf("Closing client %u\n", cl->id);
+	close(cl->fd);
+	printf("Removing client %u from room %u\n", cl->id, cl->room_id);
+	result = remove_client_from_room_by_id(rooms, cl->room_id, cl->id);
+	if (result != 0) {
+		fprintf(stderr, __FILE__ \
+				":" XSTR(__LINE__) \
+				" Could not remove client %u from room %u!" \
+				" remove_client_from_room_by_id() returned %d\n",
+				cl->id, cl->room_id, result);
+		exit(EXIT_FAILURE);
+	}
+	printf("Freeing client %u resources\n", cl->id);
+	free(cl);
+	cl = NULL;
+}
 
 void server_loop(int server_sock)
 {
@@ -74,7 +91,7 @@ void server_loop(int server_sock)
 				printf("\nClient %s:%u connected\n", addr,
 						ntohs(client_addr.sin_port));
 
-				// add client to list
+				// add client to watch list
 				// watch when it is ready to be read
 				// watch for abnormalities
 				// watch for closed on client
@@ -82,7 +99,7 @@ void server_loop(int server_sock)
 				if (cl == NULL) {
 					fprintf(stderr,
 							__FILE__ \
-							" " \
+							":" \
 							XSTR(__LINE__) \
 							" malloc()\n");
 					exit(EXIT_FAILURE);
@@ -93,6 +110,36 @@ void server_loop(int server_sock)
 				snprintf(cl->nick, MAX_NICK_LEN, "%u", cl->id);
 				cl->addr = client_addr;
 				cl->status = TO_READ;
+				// check if the room exists
+				struct room found_room;
+				result = find_room_by_id(rooms, DEFAULT_ROOM_ID,
+						&found_room);
+				if (result != 0) {
+					fprintf(stderr, __FILE__ \
+							":" XSTR(__LINE__) \
+							" find_room_by_id()" \
+							" returned %d\n",
+							result);
+					fprintf(stderr, "Default room is broken!\n");
+					exit(EXIT_FAILURE);
+				}
+
+				// insert user on default room
+				result = client_pointer_enqueue(found_room.clients, cl);
+				if (result != 0) {
+					fprintf(stderr, __FILE__ ":" \
+							XSTR(__LINE__) \
+							" client_pointer_enqueue() returned %d\n",
+							result);
+					exit(EXIT_FAILURE);
+				}
+				// cache current room
+				cl->room_id = DEFAULT_ROOM_ID;
+				printf("Client %u added to default room %u\n",
+						cl->id, cl->room_id);
+				printf("Default room %u has %u clients\n",
+						found_room.id,
+						found_room.clients->size);
 				event.data.ptr = cl;
 				event.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
 				result = epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
@@ -113,22 +160,7 @@ void server_loop(int server_sock)
 						(events[i].events & EPOLLHUP)) {
 					// remove from list
 					printf("\nA client has left\n");
-					printf("Removing client %u\n",
-							cl->id);
-					result = epoll_ctl(epoll_fd,
-							EPOLL_CTL_DEL,
-							cl->fd,
-							NULL);
-					if (result == -1) {
-						error_at_line(-1, errno,
-								__FILE__,
-								__LINE__,
-								"epoll_ctl()");
-					}
-					printf("Closing client %u\n",
-							cl->id);
-					close(cl->fd);
-					free(cl);
+					remove_server_client(cl);
 				} else {
 					// try to serve the client
 					printf("\nServing client %u\n", cl->id);
@@ -173,22 +205,7 @@ void server_loop(int server_sock)
 
 						break;
 					case TO_CLOSE:
-						printf("Removing client %u\n",
-							cl->id);
-						result = epoll_ctl(epoll_fd,
-							EPOLL_CTL_DEL,
-							cl->fd,
-							NULL);
-						if (result == -1) {
-							error_at_line(-1, errno,
-								__FILE__,
-								__LINE__,
-								"epoll_ctl()");
-						}
-						printf("Closing client %u\n",
-							cl->id);
-						close(cl->fd);
-						free(cl);
+						remove_server_client(cl);
 						break;
 					default:
 						printf("Unkown client status\n");
@@ -227,16 +244,18 @@ void serve_client(struct client *cl) {
 		} else {
 			printf("Client %u said: %.*s\n", cl->id, MSG_LEN, msg);
 			strncpy(cl->msg, msg, MAX_MSG_LEN);
-			// TODO: run stuff...
 			// response will be placed on cl->msg
 			process_client_cmd(cl);
-			// mark to expect a write event
-			printf("Will send: %.*s\n", MSG_LEN, cl->msg);
-			printf("Will mark client %u for writing\n",
+			/* Mark to expect a write event if status has not been
+			 * explicitly modified by the called command
+			 */
+			if (cl->force_status == false) {
+				printf("Will send: %.*s\n", MSG_LEN, cl->msg);
+				printf("Will mark client %u for writing\n",
 					cl->id);
-			cl->status = TO_WRITE;
+				cl->status = TO_WRITE;
+			}
 		}
-
 	} else if (cl->status == TO_WRITE) {
 		// write the stored message
 		if (send(client_sock, cl->msg, strlen(cl->msg), 0) == -1) {
@@ -250,14 +269,17 @@ void serve_client(struct client *cl) {
 				cl->id);
 		cl->status = TO_READ;
 	}
+	// restore force status flag to resume normal behaviour
+	cl->force_status = false;
 }
 
 void process_client_cmd(struct client *cl)
 {
+	int result;
 	unsigned int ui;
 	char cmd[MSG_LEN];
 	int n;
-	const char *help_msg =  "Available commands: " \
+	const char help_msg[] = "Available commands: " \
 				"(\\HELP" \
 				" Shows this text)," \
 				"(\\SETNICK new_nickname" \
@@ -268,7 +290,10 @@ void process_client_cmd(struct client *cl)
 				"(\\JOINROOM id" \
 				" Joins the room with id)," \
 				"(\\LEAVEROOM" \
-				" Leaves the current room)";
+				" Leaves the current room)," \
+				"(\\INFO" \
+				" Prints current user and room information)";
+	const size_t help_msg_len = sizeof(help_msg)/sizeof(help_msg[0]);
 
 	if (sscanf(cl->msg, "\\SETNICK %" MAX_NICK_LEN_STR "s%n", cmd, &n) == 1) {
 		// switch user nick
@@ -292,14 +317,41 @@ void process_client_cmd(struct client *cl)
 		// commands without arguments
 		if (n > 0 && cl->msg[n] == '\0') {
 			// process commands
-			if (strncmp("LEAVEROOM", cmd, MSG_LEN) == 0) {
+			if (strncmp("INFO", cmd, MSG_LEN) == 0) {
+				// print client and room
+				struct room found_room;
+				struct client found_client;
+
+				result = find_client_in_room_by_id(rooms,
+						cl->id, &found_client,
+						&found_room);
+				if (result == 0) {
+					snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> User %u aka %.*s @ room %u aka %.*s",
+							found_client.id,
+							NICK_LEN,
+							found_client.nick,
+							found_room.id,
+							ROOM_NAME_LEN,
+							found_room.name);
+
+				} else {
+					printf(XSTR(__FILE__) ":" XSTR(__LINE__) " find_client_in_room_by_id() returned %d\n",
+							result);
+					printf("User %u aka %.*s @ INVALID room %u! Disconnecting...\n", cl->id,
+							NICK_LEN, cl->nick, cl->room_id);
+					/* client will be disconnected instead
+					 * of put to be written */
+					cl->force_status = true;
+					cl->status = TO_CLOSE;
+				}
+			} else if (strncmp("LEAVEROOM", cmd, MSG_LEN) == 0) {
 				// leave the current room
 				printf("Leave room\n");
 			} else if (strncmp("HELP", cmd, MSG_LEN) == 0) {
 				printf("Help requested\n");
 				snprintf(cl->msg, MAX_MSG_LEN,
 						"\\SERVERMSG SERVER> %.*s",
-						(int) strlen(help_msg),
+						(int) strnlen(help_msg, help_msg_len),
 						help_msg);
 			} else {
 				printf("Invalid simple command\n");
@@ -313,11 +365,42 @@ void process_client_cmd(struct client *cl)
 					"\\SERVERMSG SERVER> Invalid command");
 		}
 	} else {
-		printf("Invalid command format\n");
-		snprintf(cl->msg, MAX_MSG_LEN,
-				"\\SERVERMSG SERVER> Invalid command format");
+		// Broadcast message to room
+		// get the client's room
+		struct room found_room;
+		result = find_room_by_id(rooms, cl->room_id, &found_room);
+		if (result == 0) {
+			// client is on a valid room
+			char new_msg[MSG_LEN];
+			snprintf(new_msg, MAX_MSG_LEN,
+					"\\SERVERMSG %.*s@%.*s> %.*s", NICK_LEN,
+					cl->nick, ROOM_NAME_LEN,
+					found_room.name, MSG_LEN, cl->msg);
+			strncpy(cl->msg, new_msg, MSG_LEN);
+			result = broadcast_message(cl, &found_room);
+			if (result != 0) {
+				fprintf(stderr, __FILE__ ":" XSTR(__LINE__) \
+						"Could not broadcast!" \
+						" broadcast_message() returned %d\n",
+						result);
+			}
+		} else {
+			printf(__FILE__ ":" XSTR(__LINE__) " find_room_by_id() returned %d\n",
+					result);
+			printf("User %u aka %.*s @ INVALID room %u! Disconnecting...\n", cl->id,
+					NICK_LEN, cl->nick, cl->room_id);
+			/* client will be disconnected instead
+			 * of put to be written */
+			cl->force_status = true;
+			cl->status = TO_CLOSE;
+		}
 	}
+}
 
+int broadcast_message(struct client *cl, struct room *room)
+{
+	// room must be validated beforehand
+	return talk_to_group(room->clients, cl);
 }
 
 int main(int argc, char **argv)
@@ -417,10 +500,36 @@ int main(int argc, char **argv)
 		error_at_line(-1, errno, __FILE__, __LINE__, "epoll_ctl()");
 	}
 
+	// Initialise rooms' queue
+	rooms = room_init_queue();
+	if (rooms == NULL) {
+		fprintf(stderr, "Could not start queue for rooms\n");
+		return -4;
+	}
+
+	// create the public default room
+	struct room default_room;
+	memset(&default_room, 0, sizeof(default_room));
+	default_room.id = DEFAULT_ROOM_ID;
+	default_room.limit = UINT_MAX;
+	strncpy(default_room.name, "Public lobby", ROOM_NAME_LEN);
+	default_room.clients = client_pointer_init_queue();
+	if (default_room.clients == NULL) {
+		fprintf(stderr, "Could not start clients queue for default room\n");
+		return -5;
+	}
+
+	if (room_enqueue(rooms, default_room) != 0) {
+		fprintf(stderr, "Could not add default room\n");
+		return -6;
+	}
+
 	// begin server loop
 	server_loop(sock);
 
 	close(sock);
+
+	room_kill_queue(rooms);
 
 	return 0;
 }

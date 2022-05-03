@@ -22,6 +22,15 @@
 #define MAX_NICK_LEN (_MAX_NICK_LEN)
 #define MAX_NICK_LEN_STR XSTR(_MAX_NICK_LEN)
 
+// room
+#define _ROOM_NAME_LEN 20
+#define ROOM_NAME_LEN (_ROOM_NAME_LEN)
+#define ROOM_NAME_LEN_STR XSTR(_ROOM_NAME_LEN)
+
+#define _MAX_ROOM_NAME_LEN 19
+#define MAX_ROOM_NAME_LEN (_MAX_ROOM_NAME_LEN)
+#define MAX_ROOM_NAME_LEN_STR XSTR(_MAX_ROOM_NAME_LEN)
+
 // maximum number of epoll events
 #define MAX_EVENTS (100)
 
