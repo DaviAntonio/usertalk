@@ -285,12 +285,10 @@ void process_client_cmd(struct client *cl)
 				"(\\SETNICK new_nickname" \
 				" Sets user's nickname to new_nickname" \
 				" limited to " MAX_NICK_LEN_STR " characters)," \
-				"(\\NEWROOM id" \
-				" Creates a new room with id)," \
+				"(\\NEWROOM limit name" \
+				" Creates a room with limit and name)," \
 				"(\\JOINROOM id" \
-				" Joins the room with id)," \
-				"(\\LEAVEROOM" \
-				" Leaves the current room)," \
+				" Joins the room with id and leaves the current one)," \
 				"(\\INFO" \
 				" Prints current user and room information)";
 	const size_t help_msg_len = sizeof(help_msg)/sizeof(help_msg[0]);
@@ -307,12 +305,119 @@ void process_client_cmd(struct client *cl)
 			snprintf(cl->msg, MAX_MSG_LEN,
 					"\\SERVERMSG SERVER> Invalid nick");
 		}
-	} else if (sscanf(cl->msg, "\\NEWROOM %u", &ui) == 1) {
-		// create room with limit
-		printf("Create room\n");
+	} else if (sscanf(cl->msg, "\\NEWROOM %u %" ROOM_NAME_LEN_STR "s", &ui, cmd) == 2) {
+		// create room with limit and name
+		struct room room;
+		memset(&room, 0, sizeof(room));
+		room.id = random();
+		while (room.id == DEFAULT_ROOM_ID) {
+			room.id = random();
+		}
+		room.limit = ui;
+		strncpy(room.name, cmd, ROOM_NAME_LEN);
+		room.clients = client_pointer_init_queue();
+		if (room.clients == NULL) {
+			fprintf(stderr, "Could not start clients queue for room\n");
+			exit(EXIT_FAILURE);
+		}
+
+		if (room_enqueue(rooms, room) != 0) {
+			fprintf(stderr, "Could not add room\n");
+			exit(EXIT_FAILURE);
+		}
+
+		printf("Created room %u aka %.*s\n", room.id, ROOM_NAME_LEN, room.name);
+		snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Created room %u aka %.*s",
+							room.id,
+							ROOM_NAME_LEN,
+							room.name);
 	} else if (sscanf(cl->msg, "\\JOINROOM %u", &ui) == 1) {
 		// join room with id
+		// check first
+		struct room found_room;
+		result = find_room_by_id(rooms, ui,
+				&found_room);
+		if (result != 0) {
+			fprintf(stderr, __FILE__ \
+					":" XSTR(__LINE__) \
+					" find_room_by_id()" \
+					" returned %d\n",
+					result);
+			fprintf(stderr, "Room is broken!\n");
+			snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Room does not exist");
+			return;
+		}
+
+		if (found_room.clients->size + 1 > found_room.limit) {
+			printf("Room is full\n");
+			snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Room is full");
+			return;
+		}
+
+		// check if the room exists
+		// leave first
+		result = find_room_by_id(rooms, cl->room_id,
+				&found_room);
+		if (result != 0) {
+			fprintf(stderr, __FILE__ \
+					":" XSTR(__LINE__) \
+					" find_room_by_id()" \
+					" returned %d\n",
+					result);
+			fprintf(stderr, "Room is broken!\n");
+			exit(EXIT_FAILURE);
+		}
+		struct client *trash;
+		result = client_pointer_dequeue(found_room.clients, &trash);
+		if (result != 0) {
+			fprintf(stderr, __FILE__ \
+					":" XSTR(__LINE__) \
+					" client_pointer_dequeue()" \
+					" returned %d\n",
+					result);
+			fprintf(stderr, "Room is broken!\n");
+			exit(EXIT_FAILURE);
+		}
+		printf("Client %u removed to room %u\n",
+				cl->id, cl->room_id);
+		printf("Room %u has %u clients\n",
+				found_room.id,
+				found_room.clients->size);
+
+		// join new
+		result = find_room_by_id(rooms, ui,
+				&found_room);
+		if (result != 0) {
+			fprintf(stderr, __FILE__ \
+					":" XSTR(__LINE__) \
+					" find_room_by_id()" \
+					" returned %d\n",
+					result);
+			fprintf(stderr, "Room is broken!\n");
+			exit(EXIT_FAILURE);
+		}
+
+		// insert user on default room
+		result = client_pointer_enqueue(found_room.clients, cl);
+		if (result != 0) {
+			fprintf(stderr, __FILE__ ":" \
+					XSTR(__LINE__) \
+					" client_pointer_enqueue() returned %d\n",
+					result);
+			exit(EXIT_FAILURE);
+		}
+		// cache current room
+		cl->room_id = ui;
+		printf("Client %u added to room %u\n",
+				cl->id, cl->room_id);
+		printf("Room %u has %u clients\n",
+				found_room.id,
+				found_room.clients->size);
+
 		printf("Join room\n");
+		snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Left old room and joined room %u aka %.*s",
+				found_room.id, ROOM_NAME_LEN, found_room.name);
+
 	} else if (sscanf(cl->msg, "\\%" MAX_MSG_LEN_STR "s%n", cmd, &n) == 1) {
 		// commands without arguments
 		if (n > 0 && cl->msg[n] == '\0') {
@@ -344,9 +449,6 @@ void process_client_cmd(struct client *cl)
 					cl->force_status = true;
 					cl->status = TO_CLOSE;
 				}
-			} else if (strncmp("LEAVEROOM", cmd, MSG_LEN) == 0) {
-				// leave the current room
-				printf("Leave room\n");
 			} else if (strncmp("HELP", cmd, MSG_LEN) == 0) {
 				printf("Help requested\n");
 				snprintf(cl->msg, MAX_MSG_LEN,
