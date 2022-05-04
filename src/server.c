@@ -69,6 +69,9 @@ void server_loop(int server_sock)
 					"epoll_wait()");
 		}
 
+		printf("\nMust process %d event(s) (max %u)\n", ready_fds,
+				MAX_EVENTS);
+
 		// which event is ready?
 		for (int i = 0; i < ready_fds; i++) {
 			// the server socket woke up, so a client is ready
@@ -137,9 +140,12 @@ void server_loop(int server_sock)
 				cl->room_id = DEFAULT_ROOM_ID;
 				printf("Client %u added to default room %u\n",
 						cl->id, cl->room_id);
-				printf("Default room %u has %u clients\n",
+				printf("Default room %u has %u clients (limit %u)\n",
 						found_room.id,
-						found_room.clients->size);
+						found_room.clients->size,
+						found_room.limit);
+
+				printf("Marking client %u for reading\n", cl->id);
 				event.data.ptr = cl;
 				event.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
 				result = epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
@@ -188,7 +194,7 @@ void server_loop(int server_sock)
 
 						break;
 					case TO_WRITE:
-						printf("Marking client %u for reading\n",
+						printf("Marking client %u for writing\n",
 								cl->id);
 						ev.events = EPOLLOUT | EPOLLRDHUP
 							| EPOLLHUP;
@@ -327,14 +333,18 @@ void process_client_cmd(struct client *cl)
 			exit(EXIT_FAILURE);
 		}
 
-		printf("Created room %u aka %.*s\n", room.id, ROOM_NAME_LEN, room.name);
-		snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Created room %u aka %.*s",
-							room.id,
-							ROOM_NAME_LEN,
-							room.name);
+		printf("Created room %u aka %.*s (limit %u)\n", room.id,
+				ROOM_NAME_LEN, room.name, room.limit);
+		snprintf(cl->msg,
+				MAX_MSG_LEN,
+				"\\SERVERMSG SERVER> Created room %u aka %.*s (limit %u)",
+				room.id,
+				ROOM_NAME_LEN,
+				room.name,
+				room.limit);
 	} else if (sscanf(cl->msg, "\\JOINROOM %u", &ui) == 1) {
 		// join room with id
-		// check first
+		// check first if requested room exists
 		struct room found_room;
 		result = find_room_by_id(rooms, ui,
 				&found_room);
@@ -345,13 +355,23 @@ void process_client_cmd(struct client *cl)
 					" returned %d\n",
 					result);
 			fprintf(stderr, "Room is broken!\n");
-			snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Room does not exist");
+			snprintf(cl->msg,
+					MAX_MSG_LEN,
+					"\\SERVERMSG SERVER> %u Room does not exist",
+					ui);
 			return;
 		}
-
+		// room ui exists, check if it is full
 		if (found_room.clients->size + 1 > found_room.limit) {
-			printf("Room is full\n");
-			snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Room is full");
+			printf("Room %u is full (%u/%u)\n", found_room.id,
+					found_room.clients->size,
+					found_room.limit);
+			snprintf(cl->msg,
+					MAX_MSG_LEN,
+					"\\SERVERMSG SERVER> Room %u is full (%u/%u)",
+					found_room.id,
+					found_room.clients->size,
+					found_room.limit);
 			return;
 		}
 
@@ -381,9 +401,10 @@ void process_client_cmd(struct client *cl)
 		}
 		printf("Client %u removed to room %u\n",
 				cl->id, cl->room_id);
-		printf("Room %u has %u clients\n",
+		printf("Room %u has (%u/%u) clients\n",
 				found_room.id,
-				found_room.clients->size);
+				found_room.clients->size,
+				found_room.limit);
 
 		// join new
 		result = find_room_by_id(rooms, ui,
@@ -398,7 +419,7 @@ void process_client_cmd(struct client *cl)
 			exit(EXIT_FAILURE);
 		}
 
-		// insert user on default room
+		// insert user on new room
 		result = client_pointer_enqueue(found_room.clients, cl);
 		if (result != 0) {
 			fprintf(stderr, __FILE__ ":" \
@@ -411,12 +432,15 @@ void process_client_cmd(struct client *cl)
 		cl->room_id = ui;
 		printf("Client %u added to room %u\n",
 				cl->id, cl->room_id);
-		printf("Room %u has %u clients\n",
+		printf("Room %u has (%u/%u) clients\n",
 				found_room.id,
-				found_room.clients->size);
+				found_room.clients->size,
+				found_room.limit);
 
 		printf("Join room\n");
-		snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> Left old room and joined room %u aka %.*s",
+		snprintf(cl->msg,
+				MAX_MSG_LEN,
+				"\\SERVERMSG SERVER> Left old room and joined room %u aka %.*s",
 				found_room.id, ROOM_NAME_LEN, found_room.name);
 
 	} else if (sscanf(cl->msg, "\\%" MAX_MSG_LEN_STR "s%n", cmd, &n) == 1) {
@@ -432,14 +456,17 @@ void process_client_cmd(struct client *cl)
 						cl->id, &found_client,
 						&found_room);
 				if (result == 0) {
-					snprintf(cl->msg, MAX_MSG_LEN, "\\SERVERMSG SERVER> User %u aka %.*s @ room %u aka %.*s",
+					snprintf(cl->msg,
+							MAX_MSG_LEN,
+							"\\SERVERMSG SERVER> User %u aka %.*s @ room %u aka %.*s (%u/%u)",
 							found_client.id,
 							NICK_LEN,
 							found_client.nick,
 							found_room.id,
 							ROOM_NAME_LEN,
-							found_room.name);
-
+							found_room.name,
+							found_room.clients->size,
+							found_room.limit);
 				} else {
 					printf(XSTR(__FILE__) ":" XSTR(__LINE__) " find_client_in_room_by_id() returned %d\n",
 							result);
@@ -503,7 +530,7 @@ void process_client_cmd(struct client *cl)
 int broadcast_message(struct client *cl, struct room *room)
 {
 	// room must be validated beforehand
-	return talk_to_group(room->clients, cl);
+	return talk_to_group(room->clients, cl, epoll_fd);
 }
 
 int main(int argc, char **argv)

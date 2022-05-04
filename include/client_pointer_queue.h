@@ -9,7 +9,7 @@ typedef struct client *client_pointer_t;
 
 DECLARE_CIRCULAR_QUEUE(client_pointer, client_pointer_t)
 
-int talk_to_group(client_pointer_queue_t *q, struct client *tx)
+int talk_to_group(client_pointer_queue_t *q, struct client *tx, int epoll_fd)
 {
 	if (q == NULL)
 		return -1;
@@ -20,6 +20,9 @@ int talk_to_group(client_pointer_queue_t *q, struct client *tx)
 	struct client_pointer_cell *start = q->queue;
 	struct client_pointer_cell *p;
 
+	struct epoll_event ev;
+	int result;
+
 	for (p = start->next; p != start; p = p->next) {
 		if (p->data->id != tx->id) {
 			printf("Client %u talks to %u in room %u\n", tx->id,
@@ -27,6 +30,16 @@ int talk_to_group(client_pointer_queue_t *q, struct client *tx)
 			strncpy(p->data->msg, tx->msg, MSG_LEN);
 			p->data->force_status = true;
 			p->data->status = TO_WRITE;
+
+			ev.data.ptr = p->data;
+			printf("Marking client %u for writing\n", p->data->id);
+			ev.events = EPOLLOUT | EPOLLRDHUP | EPOLLHUP;
+			result = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, p->data->fd,
+					&ev);
+			if (result == -1) {
+				error_at_line(-1, errno, __FILE__, __LINE__,
+						"epoll_ctl()");
+			}
 		}
 	}
 
